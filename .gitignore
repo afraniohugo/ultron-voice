@@ -1,0 +1,29 @@
+# Ultron Voice — local-first audio/mcp. Git ignore
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Runtime outputs (checksum + logs)
+outputs/
+logs/
+
+# Secrets (never versioned)
+*.key
+*.pem
+credentials.json
+token.json
+.env
+secrets/
+
+# OS
+.DS_Store
+Thumbs.db
