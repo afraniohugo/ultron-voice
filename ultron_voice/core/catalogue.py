@@ -47,6 +47,10 @@ TTS_ENGINES: dict[str, Engine] = {
         name="qwen3", kind="tts",
         description="Qwen3-TTS 0.6B CustomVoice, local weights and isolated CPU runtime; lab gate.",
     ),
+    "chatterbox_ptbr": Engine(
+        name="chatterbox_ptbr", kind="tts",
+        description="ResembleAI Chatterbox Portuguese Brazil MIT; isolated CPU LAB only.",
+    ),
 }
 
 
