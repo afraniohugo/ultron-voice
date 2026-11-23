@@ -1,26 +1,47 @@
-"""Audiobook pipeline: chapters -> per-chapter audio -> mixed audio.
+"""Audiobook local: concatena capítulos WAV sem VoiceStudio, rede ou GPU.
 
-Each chapter is either:
-  * a text field that is synthesised to audio, or
-  * an ``audio_path`` referencing an existing audio file that is reused.
-
-All chapter tracks are concatenated into one mixed audio file.
+O caminho PCM exige WAV sem compressao e parâmetros idênticos. Síntese de
+texto usa apenas o TTS local explicitamente configurado (quando disponível).
 """
-
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import logging
+import os
+import subprocess
+import tempfile
+import wave
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import media
 from .core.models import _utcnow
 from .core.registry import Registry
-from . import tts as tts_mod, sync
+from . import tts as tts_mod
 
 logger = logging.getLogger("ultron-voice.audiobook")
+_GAME_NAMES = {"cod.exe", "warzone.exe", "modernwarfare.exe", "cod23.exe"}
+
+
+def _game_active() -> bool:
+    """Check fail-closed on Windows, without changing the existing GameGuard."""
+    if os.name != "nt":
+        return False
+    try:
+        result = subprocess.run(
+            ["tasklist", "/FO", "CSV", "/NH"], capture_output=True,
+            text=True, errors="replace", timeout=8,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            return True
+        return any(row and row[0].strip().lower() in _GAME_NAMES
+                   for row in csv.reader(io.StringIO(result.stdout)))
+    except (OSError, subprocess.TimeoutExpired, csv.Error):
+        return True
 
 
 @dataclass
@@ -32,6 +53,7 @@ class AudiobookJob:
     tts_engine: str = "piper"
     tts_model: str = ""
     registry: Registry | None = None
+    created_at: str = field(default_factory=_utcnow)
 
 
 @dataclass
@@ -43,87 +65,139 @@ class AudiobookResult:
     error: str | None = None
 
 
+def concatenate_pcm_wavs(paths: list[Path], output_path: Path) -> None:
+    """Concatenação PCM em streaming, sem FFmpeg e sem conversão silenciosa."""
+    if not paths:
+        raise ValueError("nenhum audio para concatenar")
+    expected = None
+    with wave.open(str(output_path), "wb") as dest:
+        for src in paths:
+            if src.suffix.lower() != ".wav":
+                raise ValueError("somente arquivos WAV PCM sao aceitos nesta etapa")
+            with wave.open(str(src), "rb") as track:
+                fmt = (track.getnchannels(), track.getsampwidth(),
+                       track.getframerate(), track.getcomptype())
+                if fmt[-1] != "NONE":
+                    raise ValueError("WAV comprimido nao suportado")
+                if expected is None:
+                    expected = fmt
+                    dest.setnchannels(fmt[0])
+                    dest.setsampwidth(fmt[1])
+                    dest.setframerate(fmt[2])
+                elif expected != fmt:
+                    raise ValueError("formatos WAV incompativeis; conversao explicita necessaria")
+                while True:
+                    block = track.readframes(4096)
+                    if not block:
+                        break
+                    dest.writeframesraw(block)
+
+
 class AudiobookPipeline:
-    """Turns a chapter list into a single mixed audio file."""
+    """Gerador nativo de audiobook; grava saida final somente apos QA basico."""
 
     def __init__(self, tts=None, registry: Registry | None = None, log=None) -> None:
-        self.tts = tts or tts_mod.build_tts(
-            tts_mod.TTSConfig(engine="piper", model="pt_BR-polyglot-medium")
-        )
+        self.tts = tts
         self.registry = registry
         self.logger = log if log is not None else logger
 
     def run(self, job: AudiobookJob) -> AudiobookResult:
-        job.chunks_dir.mkdir(parents=True, exist_ok=True)
-        self.logger.info("audiobook: %s -> %s", job.title, job.output_path)
+        output = Path(job.output_path)
+        temp_output = None
         try:
-            chapter_files = self._render_chapters(job)
-            if not chapter_files:
-                return AudiobookResult(
-                    output_path=job.output_path,
-                    exit_code=1,
-                    error="nenhum capitulo com audio ou texto",
-                )
-            mixed = job.output_path
-            sync.concatenate_audios(chapter_files, mixed)
-            chapters_json = json.dumps(job.chapters, ensure_ascii=False, sort_keys=True)
-            checksums = {
-                "input": hashlib.sha256(chapters_json.encode("utf-8")).hexdigest(),
-                "output": media.sha256_file(mixed),
-            }
-            self._record(job, mixed, checksums, status="succeeded")
-            return AudiobookResult(
-                output_path=mixed,
-                checksums=checksums,
-                job_id=job.metadata.get("_id"),
-                exit_code=0,
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.logger.exception("audiobook falhou")
-            self._record(job, None, {"error": str(exc)}, status="failed")
-            return AudiobookResult(output_path=job.output_path, exit_code=1, error=str(exc))
+            if output.suffix.lower() != ".wav":
+                raise ValueError("saída nativa deve ter extensão .wav")
+            if not isinstance(job.chapters, list):
+                raise ValueError("chapters deve ser uma lista JSON")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(prefix="ultron_voice_", dir=output.parent) as tmp:
+                chunks_dir = Path(tmp)
+                tracks = self._render_chapters(job, chunks_dir)
+                if not tracks:
+                    raise ValueError("nenhum capitulo com audio ou texto")
+                fd, name = tempfile.mkstemp(prefix=".ultron_voice_", suffix=".wav", dir=output.parent)
+                os.close(fd)
+                temp_output = Path(name)
+                concatenate_pcm_wavs(tracks, temp_output)
+                with wave.open(str(temp_output), "rb") as wav:
+                    if wav.getnframes() == 0:
+                        raise ValueError("audiobook gerado sem frames")
+                checksum = media.sha256_file(temp_output)
+                os.replace(temp_output, output)
+                temp_output = None
 
-    def _render_chapters(self, job: AudiobookJob) -> list[Path]:
-        rendered: list[Path] = []
-        for i, ch in enumerate(job.chapters):
-            text = ch.get("text") or ch.get("texto") or ""
-            audio_path = ch.get("audio_path")
+            checksum_input = hashlib.sha256(
+                json.dumps(job.chapters, sort_keys=True, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
+            job_id = self._record(job, output, checksum_input, checksum, None, "succeeded")
+            return AudiobookResult(
+                output_path=output,
+                checksums={"input": checksum_input, "output": checksum},
+                job_id=job_id,
+            )
+        except Exception as exc:
+            self.logger.warning("audiobook local falhou: %s", type(exc).__name__)
+            try:
+                self._record(job, None, None, None, str(exc), "failed")
+            except Exception:
+                self.logger.exception("falha ao registrar erro de audiobook")
+            return AudiobookResult(output_path=output, exit_code=1, error=str(exc))
+        finally:
+            if temp_output is not None:
+                temp_output.unlink(missing_ok=True)
+
+    def _render_chapters(self, job: AudiobookJob, chunks_dir: Path) -> list[Path]:
+        tracks = []
+        for index, chapter in enumerate(job.chapters):
+            if not isinstance(chapter, dict):
+                raise ValueError("cada capitulo deve ser um objeto")
+            audio_path = chapter.get("audio_path")
+            text = chapter.get("text") or chapter.get("texto")
+            if audio_path and text:
+                raise ValueError("capitulo deve ter audio_path ou text, nao ambos")
             if audio_path:
                 src = Path(audio_path)
-                if not src.exists():
+                if not src.is_file():
                     raise FileNotFoundError(f"audio de capitulo nao encontrado: {src}")
-                rendered.append(src.resolve())
-                continue
-            if not text:
-                continue
-            out = job.chunks_dir / f"ch_{i:03d}.wav"
-            self.tts.synthesize(
-                text,
-                out,
-                tts_mod.TTSConfig(engine=job.tts_engine, model=job.tts_model or tts_mod.TTSConfig().model),
-            )
-            rendered.append(out)
-        return rendered
+                tracks.append(src)
+            elif text:
+                if not isinstance(text, str):
+                    raise ValueError("texto do capitulo invalido")
+                if _game_active():
+                    raise RuntimeError("GAMEGUARD_ACTIVE: TTS pausado durante jogo")
+                if job.tts_engine not in {"piper", "espeak"}:
+                    raise ValueError("engine TTS desconhecida")
+                if self.tts is None and job.tts_engine == "piper":
+                    model = Path(job.tts_model)
+                    if not model.is_absolute() or not model.is_file() or model.suffix.lower() != ".onnx":
+                        raise RuntimeError("PIPER_MODEL_LOCAL_REQUIRED: modelo .onnx instalado deve ser informado")
+                cfg = tts_mod.TTSConfig(
+                    engine=job.tts_engine,
+                    model=job.tts_model or tts_mod.TTSConfig().model,
+                )
+                tts = self.tts or tts_mod.build_tts(cfg)
+                target = chunks_dir / f"ch_{index:03d}.wav"
+                tts.synthesize(text, target, cfg)
+                if not target.is_file():
+                    raise RuntimeError("TTS local nao produziu WAV")
+                tracks.append(target)
+        return tracks
 
-    def _record(self, job: AudiobookJob, output: Path | None, checksums: dict, status: str) -> None:
-        out_path = output.as_posix() if output else ""
-        entry = {
-            "job_type": "audiobook",
-            "status": status,
-            "title": job.title,
-            "language": job.language,
-            "input_path": "",
-            "output_path": out_path,
-            "checksum_input": None,
-            "checksum_output": checksums.get("output"),
-            "errors": checksums.get("error"),
-            "step": "audiobook",
-            "started_at": job.created_at,
-            "finished_at": _utcnow(),
-            "metadata": {"tts_engine": job.tts_engine, "n_chapters": len(job.chapters)},
-        }
-        if self.registry:
-            self.registry.record(**entry)
+    def _record(self, job: AudiobookJob, output: Path | None,
+                checksum_input: str | None, checksum_output: str | None,
+                error: str | None, status: str) -> int | None:
+        registry = job.registry or self.registry
+        if registry is None:
+            return None
+        return registry.record(
+            job_type="audiobook", status=status, title=job.title,
+            language=job.language, input_path="",
+            output_path=str(output) if output else "",
+            checksum_input=checksum_input,
+            checksum_output=checksum_output, errors=error, step="audiobook",
+            started_at=job.created_at, finished_at=_utcnow(),
+            metadata={"tts_engine": job.tts_engine, "n_chapters": len(job.chapters)},
+        )
 
 
 def audiobook(job: AudiobookJob, pipeline=None) -> AudiobookResult:
