@@ -150,7 +150,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_ab.add_argument("--chapters-json", help="caminho para JSON de capitulos (UTF-8)")
     p_ab.add_argument("--chapters", default="[]", help="JSON inline com capitulos [{texto, audio_path}]")
     p_ab.add_argument("--language", default="pt-BR")
-    p_ab.add_argument("--tts-engine", default="piper")
+    p_ab.add_argument("--tts-engine", default="piper", choices=["piper", "espeak", "sapi"])
     p_ab.add_argument("--tts-model", default="pt_BR-polyglot-medium")
     p_ab.add_argument("output", help="arquivo de audio final misto")
     p_ab.add_argument("--log-dir", default="logs")

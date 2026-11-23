@@ -5,13 +5,10 @@ texto usa apenas o TTS local explicitamente configurado (quando disponível).
 """
 from __future__ import annotations
 
-import csv
 import hashlib
-import io
 import json
 import logging
 import os
-import subprocess
 import tempfile
 import wave
 from dataclasses import dataclass, field
@@ -21,27 +18,9 @@ from . import media
 from .core.models import _utcnow
 from .core.registry import Registry
 from . import tts as tts_mod
+from .gameguard import game_active as _game_active
 
 logger = logging.getLogger("ultron-voice.audiobook")
-_GAME_NAMES = {"cod.exe", "warzone.exe", "modernwarfare.exe", "cod23.exe"}
-
-
-def _game_active() -> bool:
-    """Check fail-closed on Windows, without changing the existing GameGuard."""
-    if os.name != "nt":
-        return False
-    try:
-        result = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH"], capture_output=True,
-            text=True, errors="replace", timeout=8,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        )
-        if result.returncode != 0:
-            return True
-        return any(row and row[0].strip().lower() in _GAME_NAMES
-                   for row in csv.reader(io.StringIO(result.stdout)))
-    except (OSError, subprocess.TimeoutExpired, csv.Error):
-        return True
 
 
 @dataclass
@@ -165,7 +144,7 @@ class AudiobookPipeline:
                     raise ValueError("texto do capitulo invalido")
                 if _game_active():
                     raise RuntimeError("GAMEGUARD_ACTIVE: TTS pausado durante jogo")
-                if job.tts_engine not in {"piper", "espeak"}:
+                if job.tts_engine not in {"piper", "espeak", "sapi"}:
                     raise ValueError("engine TTS desconhecida")
                 if self.tts is None and job.tts_engine == "piper":
                     model = Path(job.tts_model)
