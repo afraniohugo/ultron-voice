@@ -76,12 +76,15 @@ def inspect_manifest(raw_manifest: str) -> dict:
     instruction = info.get("instruct", "")
     if not isinstance(instruction, str) or len(instruction) > 240:
         raise NeuralPreflightError("NEURAL_INSTRUCTION_INVALID")
+    if instruction.strip():
+        raise NeuralPreflightError("NEURAL_06B_INSTRUCTION_UNSUPPORTED")
     model_dir = _path(info.get("model_dir"), MODEL_ROOT, expect_file=False)
     runtime_python = _path(info.get("runtime_python"), RUNTIME_ROOT, expect_file=True)
     if runtime_python.name.lower() != "python.exe":
         raise NeuralPreflightError("NEURAL_RUNTIME_INVALID")
     missing = []
-    for part in ("config.json", "generation_config.json", "speech_tokenizer/config.json"):
+    for part in ("config.json", "generation_config.json",
+                 "speech_tokenizer/config.json", "speech_tokenizer/model.safetensors"):
         asset = model_dir / part
         if not asset.is_file() or asset.is_symlink():
             missing.append(part)
@@ -135,6 +138,7 @@ class Qwen3LocalTTS:
             environment.update({
                 "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
                 "HF_HUB_DISABLE_TELEMETRY": "1",
+                "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
                 "ULTRON_VOICE_NO_NETWORK": "1",
                 "PYTHONNOUSERSITE": "1", "CUDA_VISIBLE_DEVICES": "",
                 "OMP_NUM_THREADS": "2",

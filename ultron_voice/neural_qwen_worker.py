@@ -48,7 +48,8 @@ def main(argv: list[str]) -> int:
         text=request["text"],
         language=request["language"],
         speaker=request["speaker"],
-        instruct=request["instruct"],
+        # The 0.6B CustomVoice checkpoint does not implement instruction control.
+        # Do not pass an ignored argument or claim expressive prompt steering.
     )
     if len(wavs) == 0 or sr < 8000:
         return 4

@@ -21,7 +21,8 @@ def _setup(tmp_path, monkeypatch):
     runtime.mkdir()
     (runtime / "python.exe").write_bytes(b"fake executable for contract test")
     for part in ("config.json", "generation_config.json",
-                 "speech_tokenizer/config.json", "model.safetensors"):
+                 "speech_tokenizer/config.json",
+                 "speech_tokenizer/model.safetensors", "model.safetensors"):
         (model / part).write_bytes(b"fixture")
     monkeypatch.setattr(qwen, "MODEL_ROOT", models)
     monkeypatch.setattr(qwen, "RUNTIME_ROOT", runtime)
@@ -35,7 +36,7 @@ def _setup(tmp_path, monkeypatch):
         "runtime_python": str(runtime / "python.exe"),
         "speaker": "Ryan",
         "language": "Portuguese",
-        "instruct": "Clear speech in Portuguese.",
+        "instruct": "",
     }
     manifest.write_text(json.dumps(payload), encoding="utf-8")
     return manifest, payload, model
@@ -68,6 +69,7 @@ def test_no_artifact_preflight_fails_without_loading_package(tmp_path, monkeypat
     ("speaker", ["Ryan"], "NEURAL_SPEAKER_INVALID"),
     ("language", "pt-BR", "NEURAL_LANGUAGE_UNSUPPORTED"),
     ("instruct", "X" * 260, "NEURAL_INSTRUCTION_INVALID"),
+    ("instruct", "Make it excited", "NEURAL_06B_INSTRUCTION_UNSUPPORTED"),
 ])
 def test_metadata_gates(tmp_path, monkeypatch, field, value, code):
     manifest, payload, _ = _setup(tmp_path, monkeypatch)
