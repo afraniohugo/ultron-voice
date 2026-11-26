@@ -16,6 +16,9 @@ from pathlib import Path
 
 from .gameguard import game_active
 from .model_lock import get_model_lock, ModelLockTimeout
+from .worker_fallback import (
+    WorkerFallbackFailure, WorkerGameGuardActive, run_with_cpu_fallback,
+)
 
 MODEL_ID = "ResembleAI/Chatterbox-Multilingual-pt-br"
 MODEL_REV = "b3952f18bc2eaa72b9bd7c17d2c4653bcad4770d"
@@ -180,12 +183,12 @@ class ChatterboxPtBrTTS:
         except ModelLockTimeout as exc:
             raise ChatterboxPreflightError("CHATTERBOX_MODEL_LOCK_TIMEOUT") from exc
 
-        try:
+        def run_once(device: str) -> int:
             with tempfile.TemporaryDirectory(prefix="uv_chatterbox_", dir=output.parent) as tmp:
                 request_path = Path(tmp) / "request.json"
                 draft = Path(tmp) / "voice.wav"
                 request_path.write_text(
-                    json.dumps(dict(settings, text=text, output=str(draft), device="xpu"), ensure_ascii=False),
+                    json.dumps(dict(settings, text=text, output=str(draft), device=device), ensure_ascii=False),
                     encoding="utf-8",
                 )
                 allow = {
@@ -227,7 +230,7 @@ class ChatterboxPtBrTTS:
                         process.kill()
                         process.communicate()
                 if process.returncode != 0:
-                    raise ChatterboxPreflightError("CHATTERBOX_WORKER_FAILED")
+                    return process.returncode
                 if not draft.is_file() or draft.stat().st_size < 80:
                     raise ChatterboxPreflightError("CHATTERBOX_AUDIO_MISSING")
                 with wave.open(str(draft), "rb") as wav:
@@ -236,6 +239,14 @@ class ChatterboxPtBrTTS:
                 if game_active():
                     raise ChatterboxPreflightError("GAMEGUARD_ACTIVE")
                 os.replace(draft, output)
+                return 0
+
+        try:
+            run_with_cpu_fallback("xpu", run_once, game_active)
+        except WorkerGameGuardActive as exc:
+            raise ChatterboxPreflightError("GAMEGUARD_ACTIVE") from exc
+        except WorkerFallbackFailure as exc:
+            raise ChatterboxPreflightError("CHATTERBOX_WORKER_FAILED") from exc
         finally:
             model_lock.release()
         return output

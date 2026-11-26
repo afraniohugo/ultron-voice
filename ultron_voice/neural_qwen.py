@@ -14,7 +14,10 @@ import wave
 from pathlib import Path
 
 from .gameguard import game_active
-from .model_lock import get_model_lock, select_device, ModelLockTimeout
+from .model_lock import get_model_lock, ModelLockTimeout
+from .worker_fallback import (
+    WorkerFallbackFailure, WorkerGameGuardActive, run_with_cpu_fallback,
+)
 
 MODEL_ROOT = Path(r"E:\IA LOCAL\models\ultron_voice")
 RUNTIME_ROOT = Path(r"E:\IA LOCAL\tools\ultron_voice_neural")
@@ -96,9 +99,10 @@ def inspect_manifest(raw_manifest: str) -> dict:
     if missing:
         raise NeuralPreflightError("NEURAL_WEIGHTS_INCOMPLETE: " + ",".join(missing))
 
-    # Select device: use manifest device field, auto-detect XPU with CPU fallback
-    requested_device = info.get("device", "auto")
-    device = select_device(requested_device)
+    # Defer torch/XPU detection to the isolated worker; keep the MCP process light.
+    device = info.get("device", "auto")
+    if device not in ("auto", "cpu", "xpu"):
+        raise NeuralPreflightError("NEURAL_DEVICE_INVALID")
 
     return {
         "status": "READY_FOR_ISOLATED_LOCAL_CANARY",
@@ -137,11 +141,11 @@ class Qwen3LocalTTS:
         except ModelLockTimeout as exc:
             raise NeuralPreflightError("NEURAL_MODEL_LOCK_TIMEOUT") from exc
 
-        try:
+        def run_once(device: str) -> int:
             with tempfile.TemporaryDirectory(prefix="ultron_qwen_", dir=output.parent) as scratch:
                 request_file = Path(scratch) / "request.json"
                 draft_file = Path(scratch) / "voice.wav"
-                request = dict(settings, text=text, output=str(draft_file))
+                request = dict(settings, text=text, output=str(draft_file), device=device)
                 request_file.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
                 # Do not expose unrelated app tokens/API keys to a neural runtime.
                 allowed_env = {
@@ -188,8 +192,7 @@ class Qwen3LocalTTS:
                         process.kill()
                         process.communicate()
                 if process.returncode != 0:
-                    # Never echo arbitrary stderr: model/runtime paths can be sensitive.
-                    raise NeuralPreflightError("NEURAL_WORKER_FAILED")
+                    return process.returncode
                 if not draft_file.is_file() or draft_file.stat().st_size < 80:
                     raise NeuralPreflightError("NEURAL_NO_AUDIO")
                 with wave.open(str(draft_file), "rb") as wav:
@@ -198,6 +201,16 @@ class Qwen3LocalTTS:
                 if game_active():
                     raise NeuralPreflightError("GAMEGUARD_ACTIVE")
                 os.replace(draft_file, output)
+                return 0
+
+        try:
+            run_with_cpu_fallback(
+                settings.get("device", "auto"), run_once, game_active
+            )
+        except WorkerGameGuardActive as exc:
+            raise NeuralPreflightError("GAMEGUARD_ACTIVE") from exc
+        except WorkerFallbackFailure as exc:
+            raise NeuralPreflightError("NEURAL_WORKER_FAILED") from exc
         finally:
             model_lock.release()
         return output

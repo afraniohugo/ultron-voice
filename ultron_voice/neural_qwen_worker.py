@@ -53,31 +53,40 @@ def main(argv: list[str]) -> int:
     else:
         use_xpu = False
 
-    # Load model on CPU first (device_map="xpu" fails due to PyTorch 2.8 XPU memory query bug)
-    model = Qwen3TTSModel.from_pretrained(
-        str(model_dir),
-        device_map="cpu",
-        dtype=torch.float32,
-        attn_implementation="eager",
-        local_files_only=True,
-    )
+    # Load the model on CPU first; XPU placement failures are eligible for CPU retry.
+    try:
+        model = Qwen3TTSModel.from_pretrained(
+            str(model_dir),
+            device_map="cpu",
+            dtype=torch.float32,
+            attn_implementation="eager",
+            local_files_only=True,
+        )
+    except Exception:
+        return 6
 
-    # Move to XPU if requested and available
-    if use_xpu:
-        model.model = model.model.to("xpu")
-        # Update cached device property so processor creates tensors on XPU
-        model.__dict__["device"] = torch.device("xpu")
+    try:
+        if use_xpu:
+            model.model = model.model.to("xpu")
+            # Update cached device property so processor creates tensors on XPU.
+            model.__dict__["device"] = torch.device("xpu")
 
-    wavs, sr = model.generate_custom_voice(
-        text=request["text"],
-        language=request["language"],
-        speaker=request["speaker"],
-        # The 0.6B CustomVoice checkpoint does not implement instruction control.
-        # Do not pass an ignored argument or claim expressive prompt steering.
-    )
+        wavs, sr = model.generate_custom_voice(
+            text=request["text"],
+            language=request["language"],
+            speaker=request["speaker"],
+            # This checkpoint does not implement instruction control.
+        )
+    except Exception:
+        # Exit 5 uniquely signals a failure after XPU was selected.
+        return 5 if use_xpu else 6
+
     if len(wavs) == 0 or sr < 8000:
         return 4
-    sf.write(str(output), wavs[0], sr, subtype="PCM_16")
+    try:
+        sf.write(str(output), wavs[0], sr, subtype="PCM_16")
+    except Exception:
+        return 6
     return 0
 
 
@@ -86,4 +95,4 @@ if __name__ == "__main__":
         raise SystemExit(main(sys.argv[1:]))
     except Exception:
         # No text, path, or credentials to stdout/stderr.
-        raise SystemExit(5)
+        raise SystemExit(6)

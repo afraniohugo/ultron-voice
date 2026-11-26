@@ -48,19 +48,26 @@ def main(argv: list[str]) -> int:
         return 3
     if device != "cpu":
         device = "xpu" if hasattr(torch, "xpu") and torch.xpu.is_available() else "cpu"
-    torch.set_num_threads(4)
-    model = ChatterboxTTS.from_local(str(model_dir), device)
-    with torch.inference_mode():
-        wav = model.generate(
-            text, audio_prompt_path=str(reference), language_id="pt",
-            exaggeration=float(doc["exaggeration"]),
-            cfg_weight=float(doc["cfg_weight"]),
-            temperature=float(doc["temperature"]),
-        )
-    audio = wav.squeeze(0).detach().to("cpu").numpy()
+    try:
+        torch.set_num_threads(4)
+        model = ChatterboxTTS.from_local(str(model_dir), device)
+        with torch.inference_mode():
+            wav = model.generate(
+                text, audio_prompt_path=str(reference), language_id="pt",
+                exaggeration=float(doc["exaggeration"]),
+                cfg_weight=float(doc["cfg_weight"]),
+                temperature=float(doc["temperature"]),
+            )
+        audio = wav.squeeze(0).detach().to("cpu").numpy()
+    except Exception:
+        # Exit 5 uniquely signals a failure after XPU was selected.
+        return 5 if device == "xpu" else 6
     if not len(audio) or not 8000 <= int(model.sr) <= 48000:
         return 4
-    sf.write(str(output), audio, int(model.sr), subtype="PCM_16")
+    try:
+        sf.write(str(output), audio, int(model.sr), subtype="PCM_16")
+    except Exception:
+        return 6
     return 0
 
 
@@ -69,4 +76,4 @@ if __name__ == "__main__":
         raise SystemExit(main(sys.argv[1:]))
     except Exception:
         # Never write model paths, environment details, or traceback to a shared file.
-        raise SystemExit(5)
+        raise SystemExit(6)
