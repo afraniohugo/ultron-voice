@@ -17,6 +17,7 @@ from .chatterbox_ptbr import (
     ChatterboxPreflightError, ChatterboxPtBrTTS, inspect_manifest,
 )
 from .gameguard import game_active
+from .model_lock import get_model_lock
 
 MAX_ITEMS = 4
 MAX_TOTAL_CHARS = 600
@@ -45,67 +46,68 @@ class ChatterboxBatchTTS(ChatterboxPtBrTTS):
             raise ValueError("CHATTERBOX_BATCH_ONE_OUTPUT_DIRECTORY")
         destination_parent = paths[0].parent
         destination_parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="uv_chatterbox_batch_", dir=destination_parent) as tmp:
-            drafts = [Path(tmp) / ("track_%03d.wav" % i) for i in range(len(texts))]
-            request_path = Path(tmp) / "request.json"
-            request_path.write_text(
-                json.dumps(dict(settings, items=[{"text": t, "output": str(d)}
-                                                for t, d in zip(texts, drafts)]),
-                           ensure_ascii=False), encoding="utf-8",
-            )
-            allow = {
-                "SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "USERPROFILE",
-                "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "COMSPEC",
-            }
-            env = {k: v for k, v in os.environ.items() if k.upper() in allow}
-            env.update({
-                "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
-                "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1", "HF_HUB_DISABLE_TELEMETRY": "1",
-                "CUDA_VISIBLE_DEVICES": "", "PYTHONNOUSERSITE": "1",
-                "OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "4",
-            })
-            process = subprocess.Popen(
-                [settings["runtime_python"], "-I", str(worker), str(request_path)],
-                cwd=tmp, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            started = time.monotonic()
-            try:
-                while True:
-                    try:
-                        process.communicate(timeout=3)
-                        break
-                    except subprocess.TimeoutExpired:
-                        if game_active():
-                            process.kill()
-                            process.communicate()
-                            raise ChatterboxPreflightError("GAMEGUARD_ACTIVE")
-                        if time.monotonic() - started > 480:
-                            process.kill()
-                            process.communicate()
-                            raise ChatterboxPreflightError("CHATTERBOX_BATCH_TIMEOUT")
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                    process.communicate()
-            if process.returncode != 0:
-                raise ChatterboxPreflightError("CHATTERBOX_BATCH_WORKER_FAILED")
-            if any(not f.is_file() or f.stat().st_size < 80 for f in drafts):
-                raise ChatterboxPreflightError("CHATTERBOX_BATCH_MISSING_AUDIO")
-            expected_format = None
-            for draft in drafts:
-                with wave.open(str(draft), "rb") as wav:
-                    fmt = (wav.getnchannels(), wav.getsampwidth(),
-                           wav.getframerate(), wav.getcomptype())
-                    if wav.getnframes() <= 0 or fmt[-1] != "NONE":
-                        raise ChatterboxPreflightError("CHATTERBOX_BATCH_INVALID_WAV")
-                    if expected_format is None:
-                        expected_format = fmt
-                    elif expected_format != fmt:
-                        raise ChatterboxPreflightError("CHATTERBOX_BATCH_MISMATCH_FORMAT")
-            if game_active():
-                raise ChatterboxPreflightError("GAMEGUARD_ACTIVE")
-            for draft, path in zip(drafts, paths):
-                os.replace(draft, path)
+        with get_model_lock():
+            with tempfile.TemporaryDirectory(prefix="uv_chatterbox_batch_", dir=destination_parent) as tmp:
+                drafts = [Path(tmp) / ("track_%03d.wav" % i) for i in range(len(texts))]
+                request_path = Path(tmp) / "request.json"
+                request_path.write_text(
+                    json.dumps(dict(settings, items=[{"text": t, "output": str(d)}
+                                                    for t, d in zip(texts, drafts)]),
+                               ensure_ascii=False), encoding="utf-8",
+                )
+                allow = {
+                    "SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "USERPROFILE",
+                    "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "COMSPEC",
+                }
+                env = {k: v for k, v in os.environ.items() if k.upper() in allow}
+                env.update({
+                    "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+                    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1", "HF_HUB_DISABLE_TELEMETRY": "1",
+                    "CUDA_VISIBLE_DEVICES": "", "PYTHONNOUSERSITE": "1",
+                    "OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "4",
+                })
+                process = subprocess.Popen(
+                    [settings["runtime_python"], "-I", str(worker), str(request_path)],
+                    cwd=tmp, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                started = time.monotonic()
+                try:
+                    while True:
+                        try:
+                            process.communicate(timeout=3)
+                            break
+                        except subprocess.TimeoutExpired:
+                            if game_active():
+                                process.kill()
+                                process.communicate()
+                                raise ChatterboxPreflightError("GAMEGUARD_ACTIVE")
+                            if time.monotonic() - started > 480:
+                                process.kill()
+                                process.communicate()
+                                raise ChatterboxPreflightError("CHATTERBOX_BATCH_TIMEOUT")
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
+                if process.returncode != 0:
+                    raise ChatterboxPreflightError("CHATTERBOX_BATCH_WORKER_FAILED")
+                if any(not f.is_file() or f.stat().st_size < 80 for f in drafts):
+                    raise ChatterboxPreflightError("CHATTERBOX_BATCH_MISSING_AUDIO")
+                expected_format = None
+                for draft in drafts:
+                    with wave.open(str(draft), "rb") as wav:
+                        fmt = (wav.getnchannels(), wav.getsampwidth(),
+                               wav.getframerate(), wav.getcomptype())
+                        if wav.getnframes() <= 0 or fmt[-1] != "NONE":
+                            raise ChatterboxPreflightError("CHATTERBOX_BATCH_INVALID_WAV")
+                        if expected_format is None:
+                            expected_format = fmt
+                        elif expected_format != fmt:
+                            raise ChatterboxPreflightError("CHATTERBOX_BATCH_MISMATCH_FORMAT")
+                if game_active():
+                    raise ChatterboxPreflightError("GAMEGUARD_ACTIVE")
+                for draft, path in zip(drafts, paths):
+                    os.replace(draft, path)
         return paths

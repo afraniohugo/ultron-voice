@@ -50,9 +50,20 @@ class FakeEngine(ChatterboxPtBrTTS):
         return out_path
 
     def synthesize_many(self, texts, outputs, config):  # type: ignore[override]
+        assert isinstance(config, TTSConfig)
         for text, out in zip(texts, outputs):
             self.synthesize(text, out, config)
         return [Path(out) for out in outputs]
+
+
+@pytest.fixture(autouse=True)
+def isolate_fake_engine_manifest(monkeypatch):
+    # This suite exercises FakeEngine only; real weight integrity is tested
+    # separately in test_chatterbox_ptbr_f4.py. Never read production assets here.
+    monkeypatch.setattr(
+        "ultron_voice.benchmark_ptbr.inspect_manifest",
+        lambda manifest: {"status": "TEST_FAKE_ENGINE", "manifest": manifest},
+    )
 
 
 @pytest.fixture()
@@ -92,16 +103,12 @@ def test_lock_exclusivity(tmp_path):
     assert timed_out
 
 
-def test_lock_stale_owner_is_replaced(tmp_path):
-    lock = InterProcessLock(tmp_path / "benchmark.pid")
-    lock.acquire()
-    lock.path.write_text("999999\n", encoding="ascii")  # dead pid
-    lock.release()
-    new_lock = InterProcessLock(tmp_path / "benchmark.pid")
-    new_lock.acquire()
-    assert new_lock.owner == os.getpid()
-    new_lock.release()
-
+def test_lock_stale_owner_is_not_stolen(tmp_path):
+    path = tmp_path / "benchmark.pid"
+    path.write_text("999999\n", encoding="ascii")
+    with pytest.raises(LockTimeout):
+        InterProcessLock(path).acquire(timeout=0)
+    assert path.read_text(encoding="ascii").strip() == "999999"
 
 # ---------------------------------------------------------------------------
 # chunk_texts

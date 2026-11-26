@@ -37,6 +37,23 @@ def main(argv: list[str]) -> int:
     import torch
     import soundfile as sf
 
+    # Device from config, default to xpu if available (matching Chatterbox pattern)
+    requested_device = request.get("device", "xpu")
+    # Auto-detect XPU availability and fallback to CPU if needed
+    use_xpu = False
+    if requested_device == "xpu":
+        try:
+            import intel_extension_for_pytorch as ipex  # noqa: F401
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                use_xpu = True
+        except Exception:
+            pass
+    elif requested_device in ("cpu", "auto"):
+        use_xpu = False
+    else:
+        use_xpu = False
+
+    # Load model on CPU first (device_map="xpu" fails due to PyTorch 2.8 XPU memory query bug)
     model = Qwen3TTSModel.from_pretrained(
         str(model_dir),
         device_map="cpu",
@@ -44,6 +61,13 @@ def main(argv: list[str]) -> int:
         attn_implementation="eager",
         local_files_only=True,
     )
+
+    # Move to XPU if requested and available
+    if use_xpu:
+        model.model = model.model.to("xpu")
+        # Update cached device property so processor creates tensors on XPU
+        model.__dict__["device"] = torch.device("xpu")
+
     wavs, sr = model.generate_custom_voice(
         text=request["text"],
         language=request["language"],

@@ -5,7 +5,7 @@ E:\\IA LOCAL\\logs\\ultron_voice\\benchmark_f6_20261123\\invalidated_comparison.
 is INVALID because two benchmark instances ran concurrently, competed for CPU
 and wrote to the same shared outputs. This benchmark therefore enforces:
 
-* one exclusive inter-process lock (lock file + heartbeat), so no two
+* one exclusive inter-process lock (fail-closed lock file), so no two
 benchmark instances can write at the same time;
 * one unique run directory per invocation (run_id), so even a second
 instance that waits for the lock produces its own tree;
@@ -28,7 +28,6 @@ import json
 import os
 import platform
 import sys
-import threading
 import time
 import wave
 import uuid
@@ -40,6 +39,7 @@ from .chatterbox_ptbr import (
     LOG_ROOT as CHATTERBOX_LOG_ROOT,
 )
 from .chatterbox_ptbr import ChatterboxPtBrTTS, inspect_manifest
+from .chatterbox_batch import ChatterboxBatchTTS
 from .gameguard import game_active
 from .tts import TTSConfig
 
@@ -48,98 +48,7 @@ from .tts import TTSConfig
 # ---------------------------------------------------------------------------
 
 
-class InterProcessLockError(RuntimeError):
-    """Base error for the lock module."""
-
-
-class LockTimeout(InterProcessLockError):
-    """The lock was held longer than the allowed window."""
-
-
-class InterProcessLock:
-    """Exclusive lock backed by a lock file with owner heartbeat.
-
-    The lock file is created with O_CREAT|O_EXCL; if it already exists the
-    contender treats it as stale when the recorded pid is dead or when the
-    file mtime is older than ``stale_after``.  A daemon heartbeat thread
-    refreshes the mtime every ``heartbeat`` seconds so a live owner is
-    never mistaken for a stale lock.
-    """
-
-    def __init__(self, path: Path, *, heartbeat: float = 5.0, stale_after: float = 30.0):
-        self.path = path
-        self.heartbeat = heartbeat
-        self.stale_after = stale_after
-        self._fd: int | None = None
-        self._owner_pid: int | None = None
-        self._stop = threading.Event()
-
-    def acquire(self, timeout: float = 120.0) -> None:
-        if self.path.parent.exists() is False:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-        deadline = time.monotonic() + timeout
-        while True:
-            try:
-                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                if self._stale():
-                    try:
-                        os.unlink(self.path)
-                    except OSError:
-                        pass
-                    continue
-                time.sleep(0.05)
-                if time.monotonic() >= deadline:
-                    raise LockTimeout(f"lock {self.path} held too long")
-                continue
-            os.write(fd, f"{os.getpid()}\n".encode("ascii"))
-            os.fsync(fd)
-            self._fd = fd
-            self._owner_pid = os.getpid()
-            threading.Thread(target=self._heartbeat, daemon=True).start()
-            return
-
-    def release(self) -> None:
-        if self._fd is not None:
-            try:
-                os.close(self._fd)
-            finally:
-                self._fd = None
-        self._stop.set()
-        try:
-            self.path.unlink(missing_ok=True)
-        except OSError:
-            pass
-
-    def _stale(self) -> bool:
-        try:
-            pid = int(self.path.read_text(encoding="ascii").strip())
-        except (OSError, ValueError):
-            return False
-        if pid == os.getpid():
-            return False
-        try:
-            os.kill(pid, 0)  # alive if no ProcessLookupError
-        except ProcessLookupError:
-            return True  # dead owner -> stale
-        except PermissionError:
-            return False  # alive but unknown -> not stale
-        try:
-            mtime = self.path.stat().st_mtime
-        except OSError:
-            return False
-        return time.monotonic() - mtime > self.stale_after
-
-    def _heartbeat(self) -> None:
-        while not self._stop.wait(self.heartbeat):
-            try:
-                os.utime(self.path, None)  # refresh mtime, keep owner alive
-            except OSError:
-                break
-
-    @property
-    def owner(self) -> int | None:
-        return self._owner_pid
+from .model_lock import ModelLock as InterProcessLock, ModelLockError as InterProcessLockError, ModelLockTimeout as LockTimeout
 
 
 # ---------------------------------------------------------------------------
@@ -275,7 +184,7 @@ def run_benchmark(config: BenchmarkConfig, engine_factory=None) -> BenchmarkResu
     if game_active():
         raise BenchmarkAbort("GAMEGUARD_ACTIVE")
     if engine_factory is None:
-        engine_factory = lambda: ChatterboxPtBrTTS()
+        engine_factory = lambda: ChatterboxBatchTTS()
     engine_config = TTSConfig(engine="chatterbox_ptbr", model=str(config.manifest))
     texts = config.texts
     if not texts:
@@ -345,7 +254,10 @@ def run_benchmark(config: BenchmarkConfig, engine_factory=None) -> BenchmarkResu
             outputs = [batch_dir / f"track_{i + 1:02d}.wav" for i in range(len(chunk_texts_))]
             engine = engine_factory() if callable(engine_factory) else engine_factory
             t0 = time.monotonic()
-            engine.synthesize_many(chunk_texts_, outputs, inspect_manifest(str(config.manifest)))
+            if len(chunk_texts_) == 1:
+                engine.synthesize(chunk_texts_[0], outputs[0], engine_config)
+            else:
+                engine.synthesize_many(chunk_texts_, outputs, engine_config)
             wall = time.monotonic() - t0
             if game_active():
                 raise BenchmarkAbort("GAMEGUARD_ACTIVE")

@@ -14,6 +14,7 @@ import wave
 from pathlib import Path
 
 from .gameguard import game_active
+from .model_lock import get_model_lock, select_device, ModelLockTimeout
 
 MODEL_ROOT = Path(r"E:\IA LOCAL\models\ultron_voice")
 RUNTIME_ROOT = Path(r"E:\IA LOCAL\tools\ultron_voice_neural")
@@ -94,6 +95,11 @@ def inspect_manifest(raw_manifest: str) -> dict:
         missing.append("model.safetensors")
     if missing:
         raise NeuralPreflightError("NEURAL_WEIGHTS_INCOMPLETE: " + ",".join(missing))
+
+    # Select device: use manifest device field, auto-detect XPU with CPU fallback
+    requested_device = info.get("device", "auto")
+    device = select_device(requested_device)
+
     return {
         "status": "READY_FOR_ISOLATED_LOCAL_CANARY",
         "source_model": MODEL_ID,
@@ -104,6 +110,7 @@ def inspect_manifest(raw_manifest: str) -> dict:
         "speaker": speaker,
         "language": "Portuguese",
         "instruct": instruction,
+        "device": device,
     }
 
 
@@ -122,64 +129,75 @@ class Qwen3LocalTTS:
         worker = Path(__file__).with_name("neural_qwen_worker.py")
         if not worker.is_file():
             raise NeuralPreflightError("NEURAL_WORKER_MISSING")
-        with tempfile.TemporaryDirectory(prefix="ultron_qwen_", dir=output.parent) as scratch:
-            request_file = Path(scratch) / "request.json"
-            draft_file = Path(scratch) / "voice.wav"
-            request = dict(settings, text=text, output=str(draft_file))
-            request_file.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
-            # Do not expose unrelated app tokens/API keys to a neural runtime.
-            allowed_env = {
-                "SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "USERPROFILE",
-                "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)",
-                "COMMONPROGRAMFILES", "COMSPEC",
-            }
-            environment = {key: value for key, value in os.environ.items()
-                           if key.upper() in allowed_env}
-            environment.update({
-                "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
-                "HF_HUB_DISABLE_TELEMETRY": "1",
-                "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
-                "ULTRON_VOICE_NO_NETWORK": "1",
-                "PYTHONNOUSERSITE": "1", "CUDA_VISIBLE_DEVICES": "",
-                "OMP_NUM_THREADS": "2",
-            })
-            # No shell. Only a curated, explicitly provided local Python runtime.
-            process = subprocess.Popen(
-                [settings["runtime_python"], "-I", str(worker), str(request_file)],
-                cwd=str(Path(scratch)),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                env=environment,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            start = time.monotonic()
-            try:
-                while True:
-                    try:
-                        process.communicate(timeout=3)
-                        break
-                    except subprocess.TimeoutExpired:
-                        if game_active():
-                            process.kill()
-                            process.communicate()
-                            raise NeuralPreflightError("GAMEGUARD_ACTIVE")
-                        if time.monotonic() - start > 300:
-                            process.kill()
-                            process.communicate()
-                            raise NeuralPreflightError("NEURAL_WORKER_TIMEOUT")
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                    process.communicate()
-            if process.returncode != 0:
-                # Never echo arbitrary stderr: model/runtime paths can be sensitive.
-                raise NeuralPreflightError("NEURAL_WORKER_FAILED")
-            if not draft_file.is_file() or draft_file.stat().st_size < 80:
-                raise NeuralPreflightError("NEURAL_NO_AUDIO")
-            with wave.open(str(draft_file), "rb") as wav:
-                if wav.getcomptype() != "NONE" or wav.getnframes() == 0:
-                    raise NeuralPreflightError("NEURAL_INVALID_WAV")
-            if game_active():
-                raise NeuralPreflightError("GAMEGUARD_ACTIVE")
-            os.replace(draft_file, output)
+
+        # Acquire exclusive model lock to prevent simultaneous Chatterbox + Qwen3 loading
+        model_lock = get_model_lock()
+        try:
+            model_lock.acquire(timeout=120.0)
+        except ModelLockTimeout as exc:
+            raise NeuralPreflightError("NEURAL_MODEL_LOCK_TIMEOUT") from exc
+
+        try:
+            with tempfile.TemporaryDirectory(prefix="ultron_qwen_", dir=output.parent) as scratch:
+                request_file = Path(scratch) / "request.json"
+                draft_file = Path(scratch) / "voice.wav"
+                request = dict(settings, text=text, output=str(draft_file))
+                request_file.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+                # Do not expose unrelated app tokens/API keys to a neural runtime.
+                allowed_env = {
+                    "SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "USERPROFILE",
+                    "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "PROGRAMFILES(X86)",
+                    "COMMONPROGRAMFILES", "COMSPEC",
+                }
+                environment = {key: value for key, value in os.environ.items()
+                               if key.upper() in allowed_env}
+                environment.update({
+                    "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+                    "HF_HUB_DISABLE_TELEMETRY": "1",
+                    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+                    "ULTRON_VOICE_NO_NETWORK": "1",
+                    "PYTHONNOUSERSITE": "1", "CUDA_VISIBLE_DEVICES": "",
+                    "OMP_NUM_THREADS": "2",
+                })
+                # No shell. Only a curated, explicitly provided local Python runtime.
+                process = subprocess.Popen(
+                    [settings["runtime_python"], "-I", str(worker), str(request_file)],
+                    cwd=str(Path(scratch)),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    env=environment,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                start = time.monotonic()
+                try:
+                    while True:
+                        try:
+                            process.communicate(timeout=3)
+                            break
+                        except subprocess.TimeoutExpired:
+                            if game_active():
+                                process.kill()
+                                process.communicate()
+                                raise NeuralPreflightError("GAMEGUARD_ACTIVE")
+                            if time.monotonic() - start > 300:
+                                process.kill()
+                                process.communicate()
+                                raise NeuralPreflightError("NEURAL_WORKER_TIMEOUT")
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
+                if process.returncode != 0:
+                    # Never echo arbitrary stderr: model/runtime paths can be sensitive.
+                    raise NeuralPreflightError("NEURAL_WORKER_FAILED")
+                if not draft_file.is_file() or draft_file.stat().st_size < 80:
+                    raise NeuralPreflightError("NEURAL_NO_AUDIO")
+                with wave.open(str(draft_file), "rb") as wav:
+                    if wav.getcomptype() != "NONE" or wav.getnframes() == 0:
+                        raise NeuralPreflightError("NEURAL_INVALID_WAV")
+                if game_active():
+                    raise NeuralPreflightError("GAMEGUARD_ACTIVE")
+                os.replace(draft_file, output)
+        finally:
+            model_lock.release()
         return output
