@@ -145,7 +145,7 @@ class VoskEngine(ASREngine):
         try:
             cmd = [
                 ffmpeg, "-y", "-v", "error", "-i", audio_path,
-                "-ac", "1", "-ar", "16000", "-sample_fmt", "s16", "-f", "s16le", tmp,
+                "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "wav", tmp,
             ]
             subprocess.run(cmd, check=True)
             with wave.open(tmp, "rb") as wf:
