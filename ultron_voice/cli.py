@@ -166,16 +166,18 @@ def _build_parser() -> argparse.ArgumentParser:
     source.add_argument("--wav", help="Local PCM WAV file")
     source.add_argument("--pcm-stdin", action="store_true", help="Raw PCM16 LE from stdin")
     p_asr.add_argument("--language", choices=["pt", "en"], default="pt")
+    p_asr.add_argument("--idle-timeout", type=int, choices=range(1,31), default=10, metavar="1..30")
+    p_asr.add_argument("--session-timeout", type=int, choices=range(5,181), default=150, metavar="5..180")
 
     return parser
 
 
-def main(argv=None) -> int:
+def main(argv=None, *, dedicated_worker=False) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     if args.command == "asr-stream":
-        from .asr_stream_cli import run
-        return run(args)
+        from .asr_stream_cli import run, run_worker
+        return run_worker(args) if dedicated_worker else run(args)
     handler = {
         "dub": _cmd_dub,
         "audiobook": _cmd_audiobook,
@@ -185,5 +187,9 @@ def main(argv=None) -> int:
     return handler(args)
 
 
+def console_main() -> int:
+    return main(dedicated_worker=True)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(console_main())

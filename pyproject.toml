@@ -24,7 +24,7 @@ dependencies = [
 
 [project.scripts]
 ultron-voice-mcp = "ultron_voice.mcp:main"
-ultron-voice = "ultron_voice.cli:main"
+ultron-voice = "ultron_voice.cli:console_main"
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<9.0", "ruff>=0.9,<0.10"]
