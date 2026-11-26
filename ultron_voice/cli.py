@@ -161,12 +161,21 @@ def _build_parser() -> argparse.ArgumentParser:
     p_engines = sub.add_parser("engines", help="Lista os motores disponiveis")
     p_engines.add_argument("--log-dir", default="logs")
 
+    p_asr = sub.add_parser("asr-stream", help="Local PCM16 mono 16kHz to incremental JSONL")
+    source = p_asr.add_mutually_exclusive_group(required=True)
+    source.add_argument("--wav", help="Local PCM WAV file")
+    source.add_argument("--pcm-stdin", action="store_true", help="Raw PCM16 LE from stdin")
+    p_asr.add_argument("--language", choices=["pt", "en"], default="pt")
+
     return parser
 
 
 def main(argv=None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
+    if args.command == "asr-stream":
+        from .asr_stream_cli import run
+        return run(args)
     handler = {
         "dub": _cmd_dub,
         "audiobook": _cmd_audiobook,
