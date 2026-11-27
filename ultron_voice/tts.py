@@ -71,4 +71,7 @@ def build_tts(config: TTSConfig) -> TTS:
     if config.engine == "qwen3":
         from .neural_qwen import Qwen3LocalTTS
         return Qwen3LocalTTS()
+    if config.engine == "chatterbox_ptbr":
+        from .chatterbox_ptbr import ChatterboxPtBrTTS
+        return ChatterboxPtBrTTS()
     raise ValueError(f"Unknown local TTS engine: {config.engine}")
