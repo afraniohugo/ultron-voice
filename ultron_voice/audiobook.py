@@ -126,6 +126,25 @@ class AudiobookPipeline:
                 temp_output.unlink(missing_ok=True)
 
     def _render_chapters(self, job: AudiobookJob, chunks_dir: Path) -> list[Path]:
+        # Small text-only audiobook jobs use one Chatterbox model load for all
+        # fragments. No persistent service, GPU or changed audio-path behavior.
+        if (self.tts is None and job.tts_engine == "chatterbox_ptbr" and
+                2 <= len(job.chapters) <= 4 and
+                all(isinstance(ch, dict) and not ch.get("audio_path") and
+                    isinstance(ch.get("text") or ch.get("texto"), str)
+                    for ch in job.chapters)):
+            from .chatterbox_batch import ChatterboxBatchTTS, MAX_TOTAL_CHARS
+            texts = [ch.get("text") or ch.get("texto") for ch in job.chapters]
+            if sum(len(t) for t in texts) <= MAX_TOTAL_CHARS:
+                if _game_active():
+                    raise RuntimeError("GAMEGUARD_ACTIVE: TTS pausado durante jogo")
+                cfg = tts_mod.TTSConfig(
+                    engine=job.tts_engine,
+                    model=job.tts_model or tts_mod.TTSConfig().model,
+                )
+                targets = [chunks_dir / f"ch_{i:03d}.wav"
+                           for i in range(len(texts))]
+                return ChatterboxBatchTTS().synthesize_many(texts, targets, cfg)
         tracks = []
         for index, chapter in enumerate(job.chapters):
             if not isinstance(chapter, dict):
