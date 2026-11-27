@@ -1,4 +1,4 @@
-"""Local TTS: Piper (default) or Espeak.
+"""Local TTS: Piper, Espeak or experimental Windows SAPI.
 
 The real TTS backends speak through a CLI subprocess. For tests the pipeline
 accepts a ``tts`` callable that writes a deterministic WAV, so no model is
@@ -61,4 +61,11 @@ class EspeakTTS(TTS):
 
 
 def build_tts(config: TTSConfig) -> TTS:
-    return PiperTTS() if config.engine == "piper" else EspeakTTS()
+    if config.engine == "piper":
+        return PiperTTS()
+    if config.engine == "espeak":
+        return EspeakTTS()
+    if config.engine == "sapi":
+        from .sapi import SapiTTS
+        return SapiTTS()
+    raise ValueError(f"Unknown local TTS engine: {config.engine}")

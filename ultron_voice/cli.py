@@ -40,8 +40,8 @@ def _configure_logging(log_dir: Path) -> None:
 
 
 def _build_registry(args) -> core_registry.Registry | None:
-    path = Path(os.environ.get("ULTRON_VOICE_REGISTRY", args.registry))
-    return core_registry.Registry(path) if path else None
+    raw = os.environ.get("ULTRON_VOICE_REGISTRY", args.registry)
+    return core_registry.Registry(Path(raw)) if raw.strip() else core_registry.Registry()
 
 
 def _cmd_dub(args) -> int:
@@ -71,13 +71,17 @@ def _cmd_dub(args) -> int:
 def _cmd_audiobook(args) -> int:
     log_dir = Path(args.log_dir)
     _configure_logging(log_dir)
-    chapters = args.chapters
-    if args.chapters_json:
-        try:
-            chapters = json.load(args.chapters_json)
-        except Exception as exc:  # noqa: BLE001
-            print(f"ERRO: invalid chapters JSON: {exc}", file=sys.stderr)
-            return 1
+    try:
+        if args.chapters_json:
+            with Path(args.chapters_json).open("r", encoding="utf-8") as file:
+                chapters = json.load(file)
+        else:
+            chapters = json.loads(args.chapters)
+        if not isinstance(chapters, list) or not all(isinstance(ch, dict) for ch in chapters):
+            raise ValueError("chapters deve ser lista de objetos")
+    except (OSError, ValueError, TypeError) as exc:
+        print(f"ERRO: chapters JSON invalido: {exc}", file=sys.stderr)
+        return 1
     job = audiobook.AudiobookJob(
         title=args.title,
         chapters=chapters,
@@ -88,10 +92,10 @@ def _cmd_audiobook(args) -> int:
         registry=_build_registry(args),
     )
     result = audiobook.audiobook(job)
-    print(f"OK: {result.output_path}")
     if result.error:
         print(f"ERRO: {result.error}", file=sys.stderr)
         return 1
+    print(f"OK: {result.output_path} | sha256={result.checksums.get('output', '')}")
     return 0
 
 
@@ -143,10 +147,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     p_ab = sub.add_parser("audiobook", help="Audiobook: capitulos -> audio -> mix")
     p_ab.add_argument("--title", required=True)
-    p_ab.add_argument("--chapters-json", type=argparse.FileType("r"), help="arquivo JSON com a lista de capitulos")
+    p_ab.add_argument("--chapters-json", help="caminho para JSON de capitulos (UTF-8)")
     p_ab.add_argument("--chapters", default="[]", help="JSON inline com capitulos [{texto, audio_path}]")
     p_ab.add_argument("--language", default="pt-BR")
-    p_ab.add_argument("--tts-engine", default="piper")
+    p_ab.add_argument("--tts-engine", default="piper", choices=["piper", "espeak", "sapi"])
     p_ab.add_argument("--tts-model", default="pt_BR-polyglot-medium")
     p_ab.add_argument("output", help="arquivo de audio final misto")
     p_ab.add_argument("--log-dir", default="logs")

@@ -39,6 +39,10 @@ TTS_ENGINES: dict[str, Engine] = {
         kind="tts",
         description="TTS local via Espeak (CLI).",
     ),
+    "sapi": Engine(
+        name="sapi", kind="tts",
+        description="Windows SAPI / System.Speech, CPU only; lab quality not approved.",
+    ),
 }
 
 
