@@ -15,6 +15,10 @@ import wave
 from pathlib import Path
 
 from .gameguard import game_active
+from .model_lock import get_model_lock, ModelLockTimeout
+from .worker_fallback import (
+    WorkerFallbackFailure, WorkerGameGuardActive, run_with_cpu_fallback,
+)
 
 MODEL_ID = "ResembleAI/Chatterbox-Multilingual-pt-br"
 MODEL_REV = "b3952f18bc2eaa72b9bd7c17d2c4653bcad4770d"
@@ -23,7 +27,7 @@ SPACE_REV = "9e515821e826e207cd617a0fdd0223899ed108ea"
 SOURCE_ROOT = Path(r"E:\IA LOCAL\tools\ultron_voice_chatterbox")
 MODELS_ROOT = Path(r"E:\IA LOCAL\models\ultron_voice")
 LOG_ROOT = Path(r"E:\IA LOCAL\logs\ultron_voice")
-REFERENCE_HASH = "9f1e59f418eb12b5c8d2bea5928f8e716823387f6d65cbd47ee5d88baa6fe947"
+REFERENCE_HASH = "66c93a60a92fb3c0c82ac9b58ae242d98533e768a48e4b18266834757dd0b086"
 FILES = (
     "t3_pt_br.safetensors", "s3gen_v3.pt",
     "grapheme_mtl_merged_expanded_v1.json", "ve.pt", "conds.pt",
@@ -171,59 +175,78 @@ class ChatterboxPtBrTTS:
         worker = Path(__file__).with_name("chatterbox_worker.py")
         if not worker.is_file():
             raise ChatterboxPreflightError("CHATTERBOX_WORKER_MISSING")
-        with tempfile.TemporaryDirectory(prefix="uv_chatterbox_", dir=output.parent) as tmp:
-            request_path = Path(tmp) / "request.json"
-            draft = Path(tmp) / "voice.wav"
-            request_path.write_text(
-                json.dumps(dict(settings, text=text, output=str(draft)), ensure_ascii=False),
-                encoding="utf-8",
-            )
-            allow = {
-                "SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "USERPROFILE",
-                "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "COMSPEC",
-            }
-            env = {key: value for key, value in os.environ.items() if key.upper() in allow}
-            env.update({
-                "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
-                "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
-                "HF_HUB_DISABLE_TELEMETRY": "1",
-                "CUDA_VISIBLE_DEVICES": "",
-                "OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "4",
-                "PYTHONNOUSERSITE": "1",
-            })
-            process = subprocess.Popen(
-                [settings["runtime_python"], "-I", str(worker), str(request_path)],
-                cwd=tmp, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE, env=env,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            started = time.monotonic()
-            try:
-                while True:
-                    try:
-                        process.communicate(timeout=3)
-                        break
-                    except subprocess.TimeoutExpired:
-                        if game_active():
-                            process.kill()
-                            process.communicate()
-                            raise ChatterboxPreflightError("GAMEGUARD_ACTIVE")
-                        if time.monotonic() - started > 480:
-                            process.kill()
-                            process.communicate()
-                            raise ChatterboxPreflightError("CHATTERBOX_TIMEOUT")
-            finally:
-                if process.poll() is None:
-                    process.kill()
-                    process.communicate()
-            if process.returncode != 0:
-                raise ChatterboxPreflightError("CHATTERBOX_WORKER_FAILED")
-            if not draft.is_file() or draft.stat().st_size < 80:
-                raise ChatterboxPreflightError("CHATTERBOX_AUDIO_MISSING")
-            with wave.open(str(draft), "rb") as wav:
-                if wav.getnframes() == 0 or wav.getcomptype() != "NONE":
-                    raise ChatterboxPreflightError("CHATTERBOX_AUDIO_INVALID")
-            if game_active():
-                raise ChatterboxPreflightError("GAMEGUARD_ACTIVE")
-            os.replace(draft, output)
+
+        # Acquire exclusive model lock to prevent simultaneous Chatterbox + Qwen3 loading
+        model_lock = get_model_lock()
+        try:
+            model_lock.acquire(timeout=120.0)
+        except ModelLockTimeout as exc:
+            raise ChatterboxPreflightError("CHATTERBOX_MODEL_LOCK_TIMEOUT") from exc
+
+        def run_once(device: str) -> int:
+            with tempfile.TemporaryDirectory(prefix="uv_chatterbox_", dir=output.parent) as tmp:
+                request_path = Path(tmp) / "request.json"
+                draft = Path(tmp) / "voice.wav"
+                request_path.write_text(
+                    json.dumps(dict(settings, text=text, output=str(draft), device=device), ensure_ascii=False),
+                    encoding="utf-8",
+                )
+                allow = {
+                    "SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "USERPROFILE",
+                    "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "COMSPEC",
+                }
+                env = {key: value for key, value in os.environ.items() if key.upper() in allow}
+                env.update({
+                    "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
+                    "HF_HUB_DISABLE_IMPLICIT_TOKEN": "1",
+                    "HF_HUB_DISABLE_TELEMETRY": "1",
+                    "CUDA_VISIBLE_DEVICES": "",
+                    "OMP_NUM_THREADS": "4", "MKL_NUM_THREADS": "4",
+                    "PYTHONNOUSERSITE": "1",
+                })
+                process = subprocess.Popen(
+                    [settings["runtime_python"], "-I", str(worker), str(request_path)],
+                    cwd=tmp, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, env=env,
+                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+                )
+                started = time.monotonic()
+                try:
+                    while True:
+                        try:
+                            process.communicate(timeout=3)
+                            break
+                        except subprocess.TimeoutExpired:
+                            if game_active():
+                                process.kill()
+                                process.communicate()
+                                raise ChatterboxPreflightError("GAMEGUARD_ACTIVE")
+                            if time.monotonic() - started > 480:
+                                process.kill()
+                                process.communicate()
+                                raise ChatterboxPreflightError("CHATTERBOX_TIMEOUT")
+                finally:
+                    if process.poll() is None:
+                        process.kill()
+                        process.communicate()
+                if process.returncode != 0:
+                    return process.returncode
+                if not draft.is_file() or draft.stat().st_size < 80:
+                    raise ChatterboxPreflightError("CHATTERBOX_AUDIO_MISSING")
+                with wave.open(str(draft), "rb") as wav:
+                    if wav.getnframes() == 0 or wav.getcomptype() != "NONE":
+                        raise ChatterboxPreflightError("CHATTERBOX_AUDIO_INVALID")
+                if game_active():
+                    raise ChatterboxPreflightError("GAMEGUARD_ACTIVE")
+                os.replace(draft, output)
+                return 0
+
+        try:
+            run_with_cpu_fallback("xpu", run_once, game_active)
+        except WorkerGameGuardActive as exc:
+            raise ChatterboxPreflightError("GAMEGUARD_ACTIVE") from exc
+        except WorkerFallbackFailure as exc:
+            raise ChatterboxPreflightError("CHATTERBOX_WORKER_FAILED") from exc
+        finally:
+            model_lock.release()
         return output

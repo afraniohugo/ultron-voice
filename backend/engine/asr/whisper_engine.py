@@ -1,45 +1,18 @@
-"""Motor ASR openai-whisper (torch).
-
-Motor complementar. Mais pesado e exige torch. Nao e o caminho escolhido
-para rodar no hardware padrao (CPU comum); e mantido como opcao de maior
-qualidade.
-
-Requisitos de validacao completa:
-    uv sync -e ".[asr]"      # openai-whisper + vosk (sem torch)
-    uv sync -e ".[local]"    # torch + transformers + openai-whisper
-
-Para testar o whisper, instale a variante torch: uv sync -e ".[local]"
-"""
-
+"""Optional OpenAI Whisper ASR; only explicitly provisioned local weights."""
 from __future__ import annotations
-
-import logging
 from pathlib import Path
-
 from .base import ASREngine
 from . import register
 
-logger = logging.getLogger(__name__)
-
-try:
-    import whisper  # noqa: F401
-except Exception:  # pragma: no cover - importa OK somente se torch+openai-whisper estao
-    whisper = None
-
-# Tamanho do modelo whisper. 'tiny' e o mais leve (rapido, qualidade
-# aceitavel para validacao). Use 'base'/'small' se houver recursos.
 MODEL_SIZE = "tiny"
-
 
 @register("whisper")
 class WhisperEngine(ASREngine):
-    """Transcricao com openai-whisper (torch)."""
-
     kind = "whisper"
 
     def __init__(self, model=None, models_dir=None):
-        self.model_size = MODEL_SIZE
-        self._model = None
+        self._model_dir = Path(models_dir).expanduser() if models_dir else Path.home() / ".cache" / "whisper"
+        self._model_path = Path(model).expanduser() if model else self._model_dir / (MODEL_SIZE + ".pt")
 
     @property
     def name(self):
@@ -47,38 +20,30 @@ class WhisperEngine(ASREngine):
 
     @property
     def model_dir(self):
-        # Whisper guarda os pesos no cache do huggingface por padrao.
-        return str(Path.home() / ".cache" / "whisper")
+        return str(self._model_dir)
 
     def transcribe(self, audio_path, *, language="pt", progress=None):
-        if whisper is None:
-            raise RuntimeError(
-                "Motor whisper nao disponivel. Instale torch + openai-whisper "
-                "(ex.: uv sync -e \".[asr]\" + \".[local]\")."
-            )
-        import whisper as _w
-
-        try:
-            model = _w.load_model(self.model_size)
-        except Exception as exc:
-            raise RuntimeError(
-                f"nao foi possivel carregar o modelo whisper ({exc})."
-            ) from exc
-        self._model = model
+        from ultron_voice.gameguard import game_active
+        from .vosk_engine import VoskEngine
+        if game_active():
+            raise RuntimeError("GAMEGUARD_ACTIVE")
+        if self._model_path.suffix.lower() != ".pt" or not self._model_path.is_file():
+            raise RuntimeError("WHISPER_LOCAL_WEIGHTS_REQUIRED")
+        # Never call load_model with a model name (which downloads weights).
+        import whisper
+        import numpy as np
+        pcm, rate = VoskEngine()._read_pcm(audio_path)
+        if rate != 16000 or not pcm:
+            raise ValueError("WHISPER_INVALID_PCM")
+        if game_active():
+            raise RuntimeError("GAMEGUARD_ACTIVE")
+        model = whisper.load_model(str(self._model_path.resolve()), device="cpu")
+        if game_active():
+            raise RuntimeError("GAMEGUARD_ACTIVE")
         if progress:
-            progress(f"Transcreveendo com whisper ({self.model_size}) ...")
-
-        try:
-            result = model.transcribe(
-                audio_path,
-                language=language or None,  # None = desconhecido (multilingua)
-                fp16=False,                 # CPU: desabilita FP16 (preciso)
-            )
-        finally:
-            del model
-
+            progress("Transcrevendo com Whisper local")
+        result = model.transcribe(np.frombuffer(pcm, dtype="<i2").astype(np.float32) / 32768.0,
+                                  language=language or None, fp16=False)
+        if game_active():
+            raise RuntimeError("GAMEGUARD_ACTIVE")
         return (result.get("text") or "").strip()
-
-    @property
-    def model_dir(self):
-        return str(Path.home() / ".cache" / "whisper")

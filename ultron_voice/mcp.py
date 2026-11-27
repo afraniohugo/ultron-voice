@@ -9,6 +9,7 @@ import asyncio
 import json
 from mcp.server.fastmcp import FastMCP
 from . import voicestudio_bridge as bridge
+from . import native_mcp as native_tools
 
 server = FastMCP("ultron-voice")
 
@@ -110,6 +111,12 @@ async def start_voice_backend() -> str:
     Does not schedule autostart, register a service, or authorize publications.
     """
     return dump(await asyncio.to_thread(bridge.start_backend))
+
+
+# Register lab-only native tools on this existing MCP server; no second server.
+server.tool()(native_tools.native_voice_health)
+server.tool()(native_tools.native_list_voices)
+server.tool()(native_tools.native_generate_speech)
 
 
 def main() -> None:

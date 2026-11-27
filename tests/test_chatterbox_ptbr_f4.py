@@ -173,16 +173,20 @@ def test_fake_worker_offline_atomic_and_token_filtered(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "secret-not-forwarded")
     monkeypatch.setenv("OPENAI_API_KEY", "secret-not-forwarded")
     records = []
+    devices = []
     class Worker:
         returncode = 0
         def __init__(self, args, **opts):
             records.append((args, opts))
             assert args[1] == "-I"
             data = json.loads(Path(args[3]).read_text(encoding="utf-8"))
+            devices.append(data["device"])
             assert data["language"] == "pt"
-            _fake_wave(data["output"])
+            self.returncode = 5 if data["device"] == "xpu" else 0
+            if self.returncode == 0:
+                _fake_wave(data["output"])
         def communicate(self, timeout=None): return b"", b""
-        def poll(self): return 0
+        def poll(self): return self.returncode
     monkeypatch.setattr(cb.subprocess, "Popen", Worker)
     config = TTSConfig(engine="chatterbox_ptbr", model=str(manifest))
     destination = tmp_path / "out.wav"
@@ -190,7 +194,8 @@ def test_fake_worker_offline_atomic_and_token_filtered(tmp_path, monkeypatch):
     assert build_tts(config).synthesize("Olá, Brasil.", destination, config) == destination
     with wave.open(str(destination), "rb") as audio:
         assert audio.getframerate() == 24000 and audio.getnframes() == 24000
-    env = records[0][1]["env"]
+    assert devices == ["xpu", "cpu"]
+    env = records[-1][1]["env"]
     assert env["HF_HUB_OFFLINE"] == "1"
     assert env["CUDA_VISIBLE_DEVICES"] == ""
     assert "HF_TOKEN" not in env and "OPENAI_API_KEY" not in env
@@ -215,7 +220,7 @@ def test_failure_preserves_original_wav(tmp_path, monkeypatch):
 
 def test_gameguard_during_worker_kills(tmp_path, monkeypatch):
     manifest, *_ = setup_lab(tmp_path, monkeypatch)
-    states = iter([False, True])
+    states = iter([False, False, True])
     monkeypatch.setattr(cb, "game_active", lambda: next(states))
     killed = []
     class Worker:

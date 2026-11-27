@@ -113,18 +113,22 @@ def test_fake_worker_verifies_offline_args_and_atomic_wav(tmp_path, monkeypatch)
     manifest, payload, _ = _setup(tmp_path, monkeypatch)
     monkeypatch.setattr(qwen, "game_active", lambda: False)
     invoked = []
+    devices = []
     class Fake:
         def __init__(self, args, **kwargs):
             invoked.append((args, kwargs))
             request = json.loads(Path(args[3]).read_text(encoding="utf-8"))
             assert request["source_model"] == qwen.MODEL_ID
+            devices.append(request["device"])
             assert request["speaker"] == "Ryan"
-            _fake_pcm(request["output"])
-            self.returncode = 0
+            self.returncode = 5 if request["device"] == "xpu" else 0
+            if self.returncode == 0:
+                _fake_pcm(request["output"])
+
         def communicate(self, timeout=None):
             return b"", b""
         def poll(self):
-            return 0
+            return self.returncode
     monkeypatch.setattr(qwen.subprocess, "Popen", Fake)
     config = TTSConfig(engine="qwen3", model=str(manifest))
     dest = tmp_path / "out.wav"
@@ -133,8 +137,8 @@ def test_fake_worker_verifies_offline_args_and_atomic_wav(tmp_path, monkeypatch)
     with wave.open(str(dest), "rb") as wav:
         assert wav.getframerate() == 16000
         assert wav.getnframes() == 16000
-    assert len(invoked) == 1
-    args, kwargs = invoked[0]
+    assert devices == ["xpu", "cpu"]
+    args, kwargs = invoked[-1]
     assert args[1] == "-I" and args[0].endswith("python.exe")
     assert kwargs["env"]["HF_HUB_OFFLINE"] == "1"
     assert kwargs["env"]["TRANSFORMERS_OFFLINE"] == "1"
@@ -162,7 +166,7 @@ def test_worker_failure_preserves_original_wav(tmp_path, monkeypatch):
 
 def test_gameguard_during_running_worker_kills_it(tmp_path, monkeypatch):
     manifest, _, _ = _setup(tmp_path, monkeypatch)
-    checks = iter([False, True])
+    checks = iter([False, False, True])
     monkeypatch.setattr(qwen, "game_active", lambda: next(checks))
     killed = []
     class Fake:

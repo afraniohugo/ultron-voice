@@ -37,23 +37,56 @@ def main(argv: list[str]) -> int:
     import torch
     import soundfile as sf
 
-    model = Qwen3TTSModel.from_pretrained(
-        str(model_dir),
-        device_map="cpu",
-        dtype=torch.float32,
-        attn_implementation="eager",
-        local_files_only=True,
-    )
-    wavs, sr = model.generate_custom_voice(
-        text=request["text"],
-        language=request["language"],
-        speaker=request["speaker"],
-        # The 0.6B CustomVoice checkpoint does not implement instruction control.
-        # Do not pass an ignored argument or claim expressive prompt steering.
-    )
+    # Device from config, default to xpu if available (matching Chatterbox pattern)
+    requested_device = request.get("device", "xpu")
+    # Auto-detect XPU availability and fallback to CPU if needed
+    use_xpu = False
+    if requested_device == "xpu":
+        try:
+            import intel_extension_for_pytorch as ipex  # noqa: F401
+            if hasattr(torch, "xpu") and torch.xpu.is_available():
+                use_xpu = True
+        except Exception:
+            pass
+    elif requested_device in ("cpu", "auto"):
+        use_xpu = False
+    else:
+        use_xpu = False
+
+    # Load the model on CPU first; XPU placement failures are eligible for CPU retry.
+    try:
+        model = Qwen3TTSModel.from_pretrained(
+            str(model_dir),
+            device_map="cpu",
+            dtype=torch.float32,
+            attn_implementation="eager",
+            local_files_only=True,
+        )
+    except Exception:
+        return 6
+
+    try:
+        if use_xpu:
+            model.model = model.model.to("xpu")
+            # Update cached device property so processor creates tensors on XPU.
+            model.__dict__["device"] = torch.device("xpu")
+
+        wavs, sr = model.generate_custom_voice(
+            text=request["text"],
+            language=request["language"],
+            speaker=request["speaker"],
+            # This checkpoint does not implement instruction control.
+        )
+    except Exception:
+        # Exit 5 uniquely signals a failure after XPU was selected.
+        return 5 if use_xpu else 6
+
     if len(wavs) == 0 or sr < 8000:
         return 4
-    sf.write(str(output), wavs[0], sr, subtype="PCM_16")
+    try:
+        sf.write(str(output), wavs[0], sr, subtype="PCM_16")
+    except Exception:
+        return 6
     return 0
 
 
@@ -62,4 +95,4 @@ if __name__ == "__main__":
         raise SystemExit(main(sys.argv[1:]))
     except Exception:
         # No text, path, or credentials to stdout/stderr.
-        raise SystemExit(5)
+        raise SystemExit(6)

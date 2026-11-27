@@ -77,3 +77,5 @@ def transcribe(audio_path, *, language="pt", engine="vosk", model=None,
 # Registrar motores ao importar este subpacote (sozinhos, na inicializacao).
 from . import vosk_engine  # noqa: F401  # registrar 'vosk'
 from . import whisper_engine  # noqa: F401  # registrar 'whisper'
+
+from . import faster_whisper_engine  # noqa: F401
