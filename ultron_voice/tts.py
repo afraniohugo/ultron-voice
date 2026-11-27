@@ -68,4 +68,7 @@ def build_tts(config: TTSConfig) -> TTS:
     if config.engine == "sapi":
         from .sapi import SapiTTS
         return SapiTTS()
+    if config.engine == "qwen3":
+        from .neural_qwen import Qwen3LocalTTS
+        return Qwen3LocalTTS()
     raise ValueError(f"Unknown local TTS engine: {config.engine}")

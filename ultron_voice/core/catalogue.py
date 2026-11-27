@@ -43,6 +43,10 @@ TTS_ENGINES: dict[str, Engine] = {
         name="sapi", kind="tts",
         description="Windows SAPI / System.Speech, CPU only; lab quality not approved.",
     ),
+    "qwen3": Engine(
+        name="qwen3", kind="tts",
+        description="Qwen3-TTS 0.6B CustomVoice, local weights and isolated CPU runtime; lab gate.",
+    ),
 }
 
 

@@ -144,7 +144,7 @@ class AudiobookPipeline:
                     raise ValueError("texto do capitulo invalido")
                 if _game_active():
                     raise RuntimeError("GAMEGUARD_ACTIVE: TTS pausado durante jogo")
-                if job.tts_engine not in {"piper", "espeak", "sapi"}:
+                if job.tts_engine not in {"piper", "espeak", "sapi", "qwen3"}:
                     raise ValueError("engine TTS desconhecida")
                 if self.tts is None and job.tts_engine == "piper":
                     model = Path(job.tts_model)
