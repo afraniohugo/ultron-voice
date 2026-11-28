@@ -69,20 +69,10 @@ def _get_json(url: str, timeout: float = 2.0) -> dict:
 
 
 def _check_game() -> bool:
-    if os.name != "nt":
-        return False
-    try:
-        result = subprocess.run(
-            ["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True,
-            timeout=9, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            errors="replace",
-        )
-        if result.returncode != 0:
-            return True  # fail-closed
-        return any(row and row[0].strip().casefold() in GAME_NAMES
-                   for row in csv.reader(io.StringIO(result.stdout)))
-    except (OSError, subprocess.TimeoutExpired, csv.Error):
-        return True
+    # Single fail-closed GameGuard sampler for the whole package: bounded
+    # tasklist timeout and short cache, no per-bridge polling under load.
+    from .gameguard import game_active
+    return game_active()
 
 
 def _require_safe() -> None:
