@@ -94,9 +94,16 @@ def test_sapi_to_vosk_real_local_chain(tmp_path):
         pytest.skip("No local ASR model; never auto-download in tests")
     path = tmp_path / "speech_local.wav"
     config = TTSConfig(engine="sapi", model="Microsoft Maria Desktop")
-    build_tts(config).synthesize(
-        "A voz foi gerada sem acessar o VoiceStudio.", path, config
-    )
+    try:
+        build_tts(config).synthesize(
+            "A voz foi gerada sem acessar o VoiceStudio.", path, config
+        )
+    except RuntimeError as exc:
+        # GameGuard can flip between the pre-check and synthesis; production
+        # stays fail-closed while the canary defers to a quiet window.
+        if "GAMEGUARD_ACTIVE" in str(exc):
+            pytest.skip("GameGuard became active during synthesis")
+        raise
     from backend.engine.asr import transcribe
     result = transcribe(str(path), language="pt", engine="vosk")
     assert not result.startswith("ERR:"), result

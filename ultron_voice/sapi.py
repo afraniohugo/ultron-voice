@@ -41,7 +41,9 @@ class SapiTTS:
             source.write_text(text, encoding="utf-8")
             command = [
                 "powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive",
-                "-File", str(script),
+                # Per-process only: never changes machine/user execution policy.
+                # Required on hosts where local .ps1 scripts are blocked by policy.
+                "-ExecutionPolicy", "Bypass", "-File", str(script),
                 "-TextPath", str(source), "-OutPath", str(temp_wav),
                 "-VoiceName", voice, "-Language", "pt-BR",
             ]
